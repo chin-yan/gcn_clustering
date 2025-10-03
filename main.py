@@ -435,6 +435,12 @@ def main():
                 
             # Step 2: Feature extraction
             print("\n🧠 Step 2: Extracting facial features...")
+
+            print(f"DEBUG: Number of detected faces: {len(face_paths)}")
+            if not face_paths:
+                print("❌ ERROR: No faces detected in Step 1!")
+                return
+
             model_dir = os.path.expanduser(args.model_dir)
             feature_extraction.load_model(sess, model_dir)
              
@@ -457,6 +463,20 @@ def main():
             print("\n🎯 Step 3: Clustering faces...")
             if args.method == 'gcn':
                 print("Using GCN clustering method...")
+                
+                print(f"DEBUG: facial_encodings type: {type(facial_encodings)}")
+                print(f"DEBUG: facial_encodings length: {len(facial_encodings)}")
+                if facial_encodings:
+                    sample_key = list(facial_encodings.keys())[0]
+                    sample_value = facial_encodings[sample_key]
+                    print(f"DEBUG: Sample key: {sample_key}")
+                    print(f"DEBUG: Sample value type: {type(sample_value)}")
+                    print(f"DEBUG: Sample value shape: {np.array(sample_value).shape}")
+                else:
+                    print("❌ ERROR: facial_encodings is EMPTY!")
+                    print(f"   face_paths length: {len(face_paths)}")
+                    print(f"   emb_array shape: {emb_array.shape}")
+                    return
                 
                 # Prepare GCN data
                 from prepare_feature import GCNDataPreparator

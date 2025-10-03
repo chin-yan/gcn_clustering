@@ -72,6 +72,16 @@ def parse_gcn_output_to_clusters(edges_path, scores_path, image_paths, threshold
     cluster_sizes = [len(c) for c in clusters]
     print(f"  Cluster size range: [{min(cluster_sizes)}, {max(cluster_sizes)}]")
     print(f"  Average cluster size: {np.mean(cluster_sizes):.1f}")
+
+    import matplotlib.pyplot as plt
+    plt.hist(scores, bins=50)
+    plt.savefig('score_distribution.png')
+    print(f"Score statistics:")
+    print(f"  Mean: {scores.mean():.3f}")
+    print(f"  Std: {scores.std():.3f}")
+    print(f"  Median: {np.median(scores):.3f}")
+    print(f"  25th percentile: {np.percentile(scores, 25):.3f}")
+    print(f"  75th percentile: {np.percentile(scores, 75):.3f}")
     
     return clusters
 
