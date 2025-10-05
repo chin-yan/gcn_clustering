@@ -1,441 +1,461 @@
+# arcface_extractor.py
 """
-Feature Extractor Replacement: FaceNet -> ArcFace
-This script provides a drop-in replacement for FaceNet feature extraction
+ArcFace Feature Extractor - Standalone ONNX Version
+直接使用 ArcFace ONNX 模型，不依賴 InsightFace 套件
 """
 
-import os
 import cv2
 import numpy as np
-from pathlib import Path
+import onnxruntime as ort
 from tqdm import tqdm
-import pickle
+import os
 
-# ============================================================================
-# ArcFace Feature Extractor
-# ============================================================================
+# 全局模型實例
+_session = None
+_input_size = (112, 112)  # ArcFace 標準輸入大小
 
-class ArcFaceExtractor:
+def load_arcface_model(model_path=r"C:\Users\VIPLAB\Desktop\Yan\gcn_clustering-master\models\arcface\arcface.onnx", use_gpu=True):
     """
-    ArcFace feature extractor using insightface
-    Compatible with FaceNet output format (512-d embeddings)
-    """
-    
-    def __init__(self, model_name='buffalo_l', ctx_id=0, det_size=(640, 640)):
-        """
-        Args:
-            model_name: Model name in insightface
-                - 'buffalo_l': Recommended, balanced accuracy and speed
-                - 'buffalo_s': Smaller, faster
-                - 'antelopev2': Higher accuracy but slower
-            ctx_id: GPU id, -1 for CPU
-            det_size: Face detection size, larger = more accurate but slower
-        """
-        try:
-            from insightface.app import FaceAnalysis
-        except ImportError:
-            raise ImportError(
-                "insightface not installed. Install with:\n"
-                "pip install insightface onnxruntime-gpu\n"
-                "or for CPU only:\n"
-                "pip install insightface onnxruntime"
-            )
-        
-        print(f"Initializing ArcFace model: {model_name}")
-        self.app = FaceAnalysis(
-            name=model_name,
-            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
-        )
-        self.app.prepare(ctx_id=ctx_id, det_size=det_size)
-        print("ArcFace model loaded successfully")
-    
-    def extract_single(self, image_path, return_largest=True):
-        """
-        Extract feature from a single image
-        
-        Args:
-            image_path: Path to image file
-            return_largest: If True, return the largest face. 
-                          If False, return all faces.
-        
-        Returns:
-            If return_largest=True: embedding array of shape (512,) or None if no face
-            If return_largest=False: list of embedding arrays
-        """
-        # Read image
-        img = cv2.imread(str(image_path))
-        if img is None:
-            print(f"Warning: Failed to read image {image_path}")
-            return None if return_largest else []
-        
-        # Detect and extract features
-        faces = self.app.get(img)
-        
-        if len(faces) == 0:
-            return None if return_largest else []
-        
-        if return_largest:
-            # Return the largest face (by bbox area)
-            largest_face = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
-            return largest_face.embedding
-        else:
-            # Return all faces
-            return [face.embedding for face in faces]
-    
-    def extract_from_array(self, img_array):
-        """
-        Extract feature from a numpy array (already loaded image)
-        
-        Args:
-            img_array: numpy array of shape (H, W, 3) in BGR format
-        
-        Returns:
-            embedding array of shape (512,) or None if no face
-        """
-        faces = self.app.get(img_array)
-        
-        if len(faces) == 0:
-            return None
-        
-        # Return the largest face
-        largest_face = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
-        return largest_face.embedding
-    
-    def extract_batch(self, image_paths, batch_size=32, show_progress=True):
-        """
-        Extract features from multiple images
-        
-        Args:
-            image_paths: List of image paths
-            batch_size: Not used (kept for API compatibility), 
-                       insightface processes images one by one
-            show_progress: Show progress bar
-        
-        Returns:
-            embeddings: numpy array of shape (N, 512)
-            valid_indices: indices of images that had faces detected
-        """
-        embeddings = []
-        valid_indices = []
-        
-        iterator = tqdm(enumerate(image_paths), total=len(image_paths), 
-                       desc="Extracting ArcFace features") if show_progress else enumerate(image_paths)
-        
-        for idx, img_path in iterator:
-            embedding = self.extract_single(img_path)
-            if embedding is not None:
-                embeddings.append(embedding)
-                valid_indices.append(idx)
-        
-        if len(embeddings) == 0:
-            print("Warning: No faces detected in any images")
-            return np.array([]), []
-        
-        return np.array(embeddings), valid_indices
-
-
-# ============================================================================
-# FaceNet Feature Extractor (for comparison/fallback)
-# ============================================================================
-
-class FaceNetExtractor:
-    """
-    FaceNet feature extractor (original implementation)
-    Kept for comparison or fallback
-    """
-    
-    def __init__(self, model_path):
-        """
-        Args:
-            model_path: Path to FaceNet model file (.pb)
-        """
-        import tensorflow as tf
-        
-        print(f"Loading FaceNet model from {model_path}")
-        
-        # Load the model
-        with tf.gfile.GFile(model_path, 'rb') as f:
-            graph_def = tf.GraphDef()
-            graph_def.ParseFromString(f.read())
-        
-        self.graph = tf.Graph()
-        with self.graph.as_default():
-            tf.import_graph_def(graph_def, name='')
-        
-        self.sess = tf.Session(graph=self.graph)
-        
-        # Get input and output tensors
-        self.images_placeholder = self.graph.get_tensor_by_name("input:0")
-        self.embeddings = self.graph.get_tensor_by_name("embeddings:0")
-        self.phase_train_placeholder = self.graph.get_tensor_by_name("phase_train:0")
-        
-        print("FaceNet model loaded successfully")
-    
-    def extract_single(self, image_path, face_crop=None):
-        """
-        Extract feature from a single face image
-        
-        Args:
-            image_path: Path to face image (should be pre-cropped to face)
-            face_crop: Not used, kept for API compatibility
-        
-        Returns:
-            embedding array of shape (512,) or (128,) depending on model
-        """
-        img = cv2.imread(str(image_path))
-        if img is None:
-            return None
-        
-        # Preprocess (FaceNet expects specific size and normalization)
-        img = cv2.resize(img, (160, 160))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = (img - 127.5) / 128.0
-        img = np.expand_dims(img, axis=0)
-        
-        # Extract features
-        feed_dict = {
-            self.images_placeholder: img,
-            self.phase_train_placeholder: False
-        }
-        embedding = self.sess.run(self.embeddings, feed_dict=feed_dict)
-        
-        return embedding[0]
-    
-    def extract_batch(self, image_paths, batch_size=32, show_progress=True):
-        """Extract features from multiple images"""
-        embeddings = []
-        valid_indices = []
-        
-        iterator = tqdm(enumerate(image_paths), total=len(image_paths),
-                       desc="Extracting FaceNet features") if show_progress else enumerate(image_paths)
-        
-        for idx, img_path in iterator:
-            embedding = self.extract_single(img_path)
-            if embedding is not None:
-                embeddings.append(embedding)
-                valid_indices.append(idx)
-        
-        return np.array(embeddings), valid_indices
-
-
-# ============================================================================
-# Unified Feature Extraction Interface
-# ============================================================================
-
-def extract_features(
-    image_paths,
-    output_path,
-    method='arcface',
-    model_path=None,
-    batch_size=32,
-    save_indices=True
-):
-    """
-    Extract features using specified method
+    載入 ArcFace ONNX 模型
     
     Args:
-        image_paths: List of image paths or path to directory
-        output_path: Path to save features (.npy or .pkl)
-        method: 'arcface' or 'facenet'
-        model_path: Path to model (only needed for facenet)
-        batch_size: Batch size for processing
-        save_indices: If True, also save the valid indices
-    
+        model_path: ONNX 模型路徑
+        use_gpu: 是否使用 GPU
+        
     Returns:
-        features: numpy array of shape (N, 512)
-        valid_indices: list of valid indices
+        onnxruntime.InferenceSession
     """
-    # Handle directory input
-    if isinstance(image_paths, (str, Path)):
-        image_dir = Path(image_paths)
-        if image_dir.is_dir():
-            extensions = ['.jpg', '.jpeg', '.png', '.bmp']
-            image_paths = [
-                str(p) for p in image_dir.rglob('*') 
-                if p.suffix.lower() in extensions
-            ]
-            print(f"Found {len(image_paths)} images in {image_dir}")
+    global _session
     
-    # Initialize extractor
-    if method.lower() == 'arcface':
-        extractor = ArcFaceExtractor()
-    elif method.lower() == 'facenet':
+    if _session is None:
+        # 如果沒有指定路徑，使用預設路徑
         if model_path is None:
-            raise ValueError("model_path must be provided for FaceNet")
-        extractor = FaceNetExtractor(model_path)
-    else:
-        raise ValueError(f"Unknown method: {method}")
+            possible_paths = [
+                'models/arcface/arcface_r100.onnx',
+                'models/arcface/arcface_r50.onnx',
+                'models/arcface/model.onnx',
+                './arcface_r100.onnx',
+                './arcface.onnx',
+            ]
+            
+            for path in possible_paths:
+                if os.path.exists(path):
+                    model_path = path
+                    break
+            
+            if model_path is None:
+                raise FileNotFoundError(
+                    "ArcFace model not found. Please download the model and place it at:\n"
+                    "  models/arcface/arcface_r100.onnx\n\n"
+                    "Download from:\n"
+                    "  https://github.com/onnx/models/tree/main/vision/body_analysis/arcface\n"
+                    "  or\n"
+                    "  https://huggingface.co/models?search=arcface"
+                )
+        
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+        
+        print(f"Loading ArcFace model from: {model_path}")
+        
+        # 設定 providers
+        if use_gpu:
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            print("Attempting to use GPU...")
+        else:
+            providers = ['CPUExecutionProvider']
+            print("Using CPU mode...")
+        
+        try:
+            # 載入模型
+            _session = ort.InferenceSession(model_path, providers=providers)
+            
+            # 顯示模型信息
+            actual_provider = _session.get_providers()[0]
+            print(f"✅ ArcFace model loaded successfully")
+            print(f"   Provider: {actual_provider}")
+            print(f"   Model path: {model_path}")
+            
+            # 顯示輸入輸出信息
+            input_info = _session.get_inputs()[0]
+            output_info = _session.get_outputs()[0]
+            print(f"   Input: {input_info.name}, shape: {input_info.shape}")
+            print(f"   Output: {output_info.name}, shape: {output_info.shape}")
+            
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            # 如果 GPU 失敗，嘗試 CPU
+            if use_gpu:
+                print("Falling back to CPU...")
+                _session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+                print("✅ Model loaded with CPU")
     
-    # Extract features
-    print(f"\nExtracting features using {method.upper()}...")
-    features, valid_indices = extractor.extract_batch(
-        image_paths,
-        batch_size=batch_size,
-        show_progress=True
-    )
-    
-    print(f"\nExtracted {len(features)} features from {len(image_paths)} images")
-    print(f"Success rate: {len(features)/len(image_paths)*100:.1f}%")
-    
-    # Save features
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    np.save(output_path, features)
-    print(f"Features saved to {output_path}")
-    
-    # Save indices if requested
-    if save_indices:
-        indices_path = output_path.parent / f"{output_path.stem}_indices.npy"
-        np.save(indices_path, valid_indices)
-        print(f"Valid indices saved to {indices_path}")
-    
-    return features, valid_indices
+    return _session
 
 
-# ============================================================================
-# Comparison Utility
-# ============================================================================
-
-def compare_extractors(image_paths, facenet_model_path, n_samples=100):
+def preprocess_face(img, input_size=(112, 112)):
     """
-    Compare FaceNet and ArcFace on the same images
-    Useful for understanding the feature quality difference
+    預處理人臉圖片
+    
+    ArcFace 標準預處理流程:
+    1. Resize to 112x112
+    2. BGR to RGB
+    3. Transpose to CHW format (Channel, Height, Width)
+    4. Normalize to [-1, 1]
+    5. Add batch dimension
     
     Args:
-        image_paths: List of image paths
-        facenet_model_path: Path to FaceNet model
-        n_samples: Number of samples to compare
+        img: BGR 格式的圖片 (OpenCV 格式)
+        input_size: 目標大小 (height, width)
+        
+    Returns:
+        預處理後的 numpy array, shape (1, 3, 112, 112)
     """
-    from sklearn.metrics.pairwise import cosine_similarity
+    # Step 1: Resize
+    if img.shape[0] != input_size[0] or img.shape[1] != input_size[1]:
+        img = cv2.resize(img, (input_size[1], input_size[0]))
     
-    # Sample images if too many
-    if len(image_paths) > n_samples:
-        indices = np.random.choice(len(image_paths), n_samples, replace=False)
-        image_paths = [image_paths[i] for i in indices]
+    # Step 2: BGR to RGB
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     
-    print("Extracting features with FaceNet...")
-    facenet = FaceNetExtractor(facenet_model_path)
-    facenet_features, facenet_indices = facenet.extract_batch(image_paths)
+    # Step 3: Transpose to CHW
+    img = img.transpose(2, 0, 1)  # (H, W, C) -> (C, H, W)
     
-    print("\nExtracting features with ArcFace...")
-    arcface = ArcFaceExtractor()
-    arcface_features, arcface_indices = arcface.extract_batch(image_paths)
+    # Step 4: Normalize to [-1, 1]
+    img = img.astype(np.float32)
+    img = (img - 127.5) / 128.0
     
-    # Compare on common images
-    common_indices = list(set(facenet_indices) & set(arcface_indices))
-    print(f"\nCommon detections: {len(common_indices)}/{len(image_paths)}")
+    # Step 5: Add batch dimension
+    img = np.expand_dims(img, axis=0)  # (C, H, W) -> (1, C, H, W)
     
-    if len(common_indices) < 10:
-        print("Too few common detections for meaningful comparison")
+    return img
+
+
+def extract_single_feature(session, img, input_name):
+    """
+    提取單張圖片的特徵
+    
+    Args:
+        session: ONNX session
+        img: 預處理後的圖片
+        input_name: 模型輸入名稱
+        
+    Returns:
+        特徵向量 (512-d)
+    """
+    try:
+        # ONNX 推理
+        embedding = session.run(None, {input_name: img})[0]
+        
+        # 取出 batch 維度
+        embedding = embedding[0]
+        
+        # L2 正規化
+        norm = np.linalg.norm(embedding)
+        if norm > 1e-8:
+            embedding = embedding / norm
+        else:
+            return None
+        
+        return embedding
+        
+    except Exception as e:
+        print(f"Inference error: {e}")
+        return None
+
+
+def extract_features_from_paths(face_paths, batch_size=32, use_gpu=False, model_path=None):
+    """
+    從人臉圖片路徑列表提取特徵
+    
+    Args:
+        face_paths: 人臉圖片路徑列表
+        batch_size: 批次大小
+        use_gpu: 是否使用 GPU
+        model_path: 模型路徑（可選）
+        
+    Returns:
+        dict: {圖片路徑: 特徵向量} 的字典
+    """
+    print(f"Extracting ArcFace features from {len(face_paths)} face images...")
+    
+    # 載入模型
+    session = load_arcface_model(model_path=model_path, use_gpu=use_gpu)
+    input_name = session.get_inputs()[0].name
+    
+    facial_encodings = {}
+    successful = 0
+    failed = 0
+    failed_paths = []
+    
+    # 批次處理
+    for i in tqdm(range(0, len(face_paths), batch_size), desc="Extracting features"):
+        batch_paths = face_paths[i:i+batch_size]
+        batch_images = []
+        valid_paths = []
+        
+        # 準備批次
+        for path in batch_paths:
+            try:
+                # 讀取圖片
+                img = cv2.imread(path)
+                if img is None:
+                    failed += 1
+                    failed_paths.append(path)
+                    continue
+                
+                # 預處理
+                processed_img = preprocess_face(img)
+                batch_images.append(processed_img)
+                valid_paths.append(path)
+                
+            except Exception as e:
+                failed += 1
+                failed_paths.append(path)
+                continue
+        
+        if len(batch_images) == 0:
+            continue
+        
+        # 批次推理
+        try:
+            # 合併批次
+            batch_array = np.vstack(batch_images)
+            
+            # ONNX 推理
+            embeddings = session.run(None, {input_name: batch_array})[0]
+            
+            # 處理結果
+            for path, embedding in zip(valid_paths, embeddings):
+                # L2 正規化
+                norm = np.linalg.norm(embedding)
+                if norm > 1e-8:
+                    embedding = embedding / norm
+                    facial_encodings[path] = embedding
+                    successful += 1
+                else:
+                    failed += 1
+                    failed_paths.append(path)
+                    
+        except Exception as e:
+            # 批次失敗，嘗試單個處理
+            for path, img_data in zip(valid_paths, batch_images):
+                embedding = extract_single_feature(session, img_data, input_name)
+                if embedding is not None:
+                    facial_encodings[path] = embedding
+                    successful += 1
+                else:
+                    failed += 1
+                    failed_paths.append(path)
+    
+    # 打印結果
+    print(f"✅ Feature extraction completed: {successful} successful, {failed} failed")
+    
+    if failed > 0:
+        failure_rate = failed / len(face_paths) * 100
+        print(f"   Failure rate: {failure_rate:.1f}%")
+        
+        if failure_rate > 10:
+            print(f"⚠️ High failure rate! First 3 failed images:")
+            for path in failed_paths[:3]:
+                print(f"      {path}")
+                try:
+                    img = cv2.imread(path)
+                    if img is None:
+                        print(f"         → Cannot read image")
+                    else:
+                        print(f"         → Image shape: {img.shape}, dtype: {img.dtype}")
+                except Exception as e:
+                    print(f"         → Error: {e}")
+    
+    if len(facial_encodings) > 0:
+        sample_feature = list(facial_encodings.values())[0]
+        print(f"   Feature dimension: {sample_feature.shape[0]}")
+        print(f"   Feature norm: {np.linalg.norm(sample_feature):.3f}")
+        print(f"   Feature range: [{sample_feature.min():.3f}, {sample_feature.max():.3f}]")
+    else:
+        print("❌ ERROR: No features extracted!")
+    
+    return facial_encodings
+
+
+def extract_features_batch(session, face_images, use_gpu=False):
+    """
+    批次提取特徵（用於 video annotation）
+    
+    Args:
+        session: ONNX session（如果為 None 會自動載入）
+        face_images: numpy array of face images, shape (N, H, W, 3), BGR format
+        use_gpu: 是否使用 GPU
+        
+    Returns:
+        numpy array: 特徵矩陣, shape (N, feature_dim)
+    """
+    if session is None:
+        session = load_arcface_model(use_gpu=use_gpu)
+    
+    input_name = session.get_inputs()[0].name
+    
+    # 預處理所有圖片
+    processed_images = []
+    for img in face_images:
+        try:
+            processed_img = preprocess_face(img)
+            processed_images.append(processed_img)
+        except:
+            # 失敗則添加零數據
+            processed_images.append(np.zeros((1, 3, 112, 112), dtype=np.float32))
+    
+    # 合併批次
+    batch_array = np.vstack(processed_images)
+    
+    try:
+        # ONNX 推理
+        embeddings = session.run(None, {input_name: batch_array})[0]
+        
+        # L2 正規化
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-8)
+        embeddings = embeddings / norms
+        
+        return embeddings
+        
+    except Exception as e:
+        print(f"Batch inference failed: {e}")
+        # 返回零向量
+        feature_dim = 512  # ArcFace 標準輸出維度
+        return np.zeros((len(face_images), feature_dim), dtype=np.float32)
+
+
+# ============================================================================
+# 測試和工具函數
+# ============================================================================
+
+def test_on_image(image_path, model_path=None):
+    """
+    測試單張圖片的特徵提取
+    
+    Args:
+        image_path: 圖片路徑
+        model_path: 模型路徑
+    """
+    print(f"Testing feature extraction on: {image_path}")
+    
+    if not os.path.exists(image_path):
+        print(f"❌ Image not found: {image_path}")
         return
     
-    # Get features for common images
-    facenet_common = facenet_features[[facenet_indices.index(i) for i in common_indices]]
-    arcface_common = arcface_features[[arcface_indices.index(i) for i in common_indices]]
+    # 載入模型
+    session = load_arcface_model(model_path=model_path, use_gpu=False)
+    input_name = session.get_inputs()[0].name
     
-    # Compute similarity matrices
-    facenet_sim = cosine_similarity(facenet_common)
-    arcface_sim = cosine_similarity(arcface_common)
+    # 讀取圖片
+    img = cv2.imread(image_path)
+    print(f"Image shape: {img.shape}")
     
-    # Statistics (excluding diagonal)
-    mask = ~np.eye(len(facenet_sim), dtype=bool)
+    # 預處理
+    processed = preprocess_face(img)
+    print(f"Preprocessed shape: {processed.shape}")
     
-    print("\n=== Similarity Statistics ===")
-    print(f"FaceNet:")
-    print(f"  Mean: {facenet_sim[mask].mean():.3f}")
-    print(f"  Std:  {facenet_sim[mask].std():.3f}")
-    
-    print(f"\nArcFace:")
-    print(f"  Mean: {arcface_sim[mask].mean():.3f}")
-    print(f"  Std:  {arcface_sim[mask].std():.3f}")
-    
-    # Typically, ArcFace should have:
-    # - Lower mean similarity (better separation)
-    # - Similar or higher std (maintains within-class similarity)
-
-
-# ============================================================================
-# Usage Examples
-# ============================================================================
-
-if __name__ == "__main__":
-    """
-    Example usage scenarios
-    """
-    
-    # ========================================================================
-    # Scenario 1: Extract features from a directory of face images
-    # ========================================================================
-    
-    # Using ArcFace (RECOMMENDED)
-    features, indices = extract_features(
-        image_paths='path/to/face/images',  # directory with face images
-        output_path='features/arcface_features.npy',
-        method='arcface'
-    )
-    
-    # ========================================================================
-    # Scenario 2: Extract features from a list of image paths
-    # ========================================================================
-    
-    # Suppose you already have a list of face image paths
-    face_image_paths = [
-        'path/to/face1.jpg',
-        'path/to/face2.jpg',
-        # ... more paths
-    ]
-    
-    extractor = ArcFaceExtractor()
-    features, valid_indices = extractor.extract_batch(face_image_paths)
-    
-    # Save
-    np.save('features/my_features.npy', features)
-    
-    # ========================================================================
-    # Scenario 3: Extract from a single image
-    # ========================================================================
-    
-    extractor = ArcFaceExtractor()
-    embedding = extractor.extract_single('path/to/single_face.jpg')
+    # 提取特徵
+    embedding = extract_single_feature(session, processed, input_name)
     
     if embedding is not None:
-        print(f"Extracted embedding shape: {embedding.shape}")  # (512,)
+        print(f"✅ Feature extraction successful!")
+        print(f"   Feature shape: {embedding.shape}")
+        print(f"   Feature norm: {np.linalg.norm(embedding):.6f}")
+        print(f"   Feature stats:")
+        print(f"      Mean: {embedding.mean():.6f}")
+        print(f"      Std: {embedding.std():.6f}")
+        print(f"      Min: {embedding.min():.6f}")
+        print(f"      Max: {embedding.max():.6f}")
+        return embedding
+    else:
+        print(f"❌ Feature extraction failed")
+        return None
+
+
+def compare_two_faces(image_path1, image_path2, model_path=None):
+    """
+    比較兩張人臉的相似度
     
-    # ========================================================================
-    # Scenario 4: Compare FaceNet vs ArcFace (optional)
-    # ========================================================================
+    Args:
+        image_path1: 第一張圖片路徑
+        image_path2: 第二張圖片路徑
+        model_path: 模型路徑
+    """
+    print(f"Comparing faces:")
+    print(f"  Image 1: {image_path1}")
+    print(f"  Image 2: {image_path2}")
     
-    compare_extractors(
-        image_paths=face_image_paths,
-        facenet_model_path='models/20180402-114759/20180402-114759.pb',
-        n_samples=50
+    # 提取特徵
+    encodings = extract_features_from_paths(
+        [image_path1, image_path2],
+        batch_size=2,
+        use_gpu=False,
+        model_path=model_path
     )
     
-    # ========================================================================
-    # Scenario 5: Integration with existing GCN clustering pipeline
-    # ========================================================================
+    if len(encodings) == 2:
+        feat1 = encodings[image_path1]
+        feat2 = encodings[image_path2]
+        
+        # 計算餘弦相似度
+        similarity = np.dot(feat1, feat2)
+        
+        print(f"\n✅ Comparison result:")
+        print(f"   Cosine similarity: {similarity:.6f}")
+        
+        if similarity > 0.7:
+            print(f"   → Same person (high confidence)")
+        elif similarity > 0.5:
+            print(f"   → Likely same person")
+        elif similarity > 0.3:
+            print(f"   → Uncertain")
+        else:
+            print(f"   → Different person")
+        
+        return similarity
+    else:
+        print(f"❌ Failed to extract features from one or both images")
+        return None
+
+if __name__ == "__main__":
+    import argparse
     
-    # Step 1: Extract ArcFace features
-    print("Step 1: Extracting features...")
-    features, valid_indices = extract_features(
-        image_paths='data/video1/faces',
-        output_path='features/video1_arcface.npy',
-        method='arcface'
-    )
+    parser = argparse.ArgumentParser(description='ArcFace Feature Extractor - Standalone Version')
+    parser.add_argument('--test_image', type=str, help='Test single image')
+    parser.add_argument('--compare', nargs=2, metavar=('IMG1', 'IMG2'), help='Compare two images')
+    parser.add_argument('--model', type=str, default=None, help='Path to ArcFace ONNX model')
     
-    # Step 2: Load features and run GCN clustering
-    # (This is where your existing gin-clustering code continues)
-    print("Step 2: Running GCN clustering...")
-    # from your_gcn_module import cluster_with_gcn
-    # clusters = cluster_with_gcn(features, k1=20, k2=5)
+    args = parser.parse_args()
     
-    # Step 3: Run diagnostics to verify improvement
-    print("Step 3: Running diagnostics...")
-    from feature_diagnostics import FeatureQualityDiagnostics
-    
-    diagnostics = FeatureQualityDiagnostics(
-        features=features,
-        labels=None,
-        video_name="video1_arcface"
-    )
-    diagnostics.run_full_diagnostics()
+    if args.test_image:
+        # 測試單張圖片
+        test_on_image(args.test_image, args.model)
+        
+    elif args.compare:
+        # 比較兩張圖片
+        compare_two_faces(args.compare[0], args.compare[1], args.model)
+        
+    else:
+        # 默認：測試模型載入
+        print("ArcFace Feature Extractor - Standalone Version")
+        print("=" * 60)
+        
+        try:
+            session = load_arcface_model(model_path=args.model, use_gpu=False)
+            print("\n✅ Model loaded successfully!")
+            print("\nUsage examples:")
+            print("  # Test single image:")
+            print(f"  python {__file__} --test_image path/to/face.jpg")
+            print("\n  # Compare two faces:")
+            print(f"  python {__file__} --compare face1.jpg face2.jpg")
+            print("\n  # Specify model path:")
+            print(f"  python {__file__} --model path/to/model.onnx --test_image face.jpg")
+            
+        except Exception as e:
+            print(f"\n❌ Error: {e}")
+            print("\nPlease download ArcFace model:")
+            print("  1. Download from: https://github.com/onnx/models/tree/main/vision/body_analysis/arcface")
+            print("  2. Place at: models/arcface/arcface_r100.onnx")

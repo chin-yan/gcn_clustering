@@ -22,6 +22,7 @@ import enhanced_face_retrieval
 import enhanced_video_annotation
 import robust_temporal_consistency
 import cluster_post_processing
+import arcface_extractor
 
 tf.disable_v2_behavior()
 
@@ -453,11 +454,14 @@ def main():
             nrof_batches = int(math.ceil(1.0*nrof_images / args.batch_size))
             emb_array = np.zeros((nrof_images, embedding_size))
             
-            facial_encodings = feature_extraction.compute_facial_encodings(
+            '''facial_encodings = feature_extraction.compute_facial_encodings(
                 sess, images_placeholder, embeddings, phase_train_placeholder,
                 args.face_size, embedding_size, nrof_images, nrof_batches,
                 emb_array, args.batch_size, face_paths
-            )
+            )'''
+
+            facial_encodings = arcface_extractor.extract_features_from_paths(
+                face_paths, batch_size=args.batch_size, use_gpu=True)
             
             # Step 3: Clustering
             print("\n🎯 Step 3: Clustering faces...")
@@ -482,9 +486,12 @@ def main():
                 from prepare_feature import GCNDataPreparator
                 from gcn_cluster_parser import run_gcn_clustering_and_parse
                 import pickle
+
+                n_faces = len(facial_encodings)
+                k_neighbors = min(80, n_faces - 1) 
                 
                 # Prepare GCN data
-                preparator = GCNDataPreparator(k_neighbors=80)
+                preparator = GCNDataPreparator(k_neighbors=k_neighbors)
                 features, paths = preparator.convert_encodings_to_features(facial_encodings)
                 knn_graph = preparator.build_knn_graph(features)
                 
