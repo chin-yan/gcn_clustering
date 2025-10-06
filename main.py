@@ -461,7 +461,7 @@ def main():
             )'''
 
             facial_encodings = arcface_extractor.extract_features_from_paths(
-                face_paths, batch_size=args.batch_size, use_gpu=True)
+                face_paths, batch_size=args.batch_size, use_gpu=False)
             
             # Step 3: Clustering
             print("\n🎯 Step 3: Clustering faces...")
@@ -488,7 +488,7 @@ def main():
                 import pickle
 
                 n_faces = len(facial_encodings)
-                k_neighbors = min(80, n_faces - 1) 
+                k_neighbors = min(50, n_faces - 1) 
                 
                 # Prepare GCN data
                 preparator = GCNDataPreparator(k_neighbors=k_neighbors)

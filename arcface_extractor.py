@@ -1,14 +1,12 @@
-# arcface_extractor.py
-"""
-ArcFace Feature Extractor - Standalone ONNX Version
-直接使用 ArcFace ONNX 模型，不依賴 InsightFace 套件
-"""
+import os
+import sys
+
+
 
 import cv2
 import numpy as np
 import onnxruntime as ort
 from tqdm import tqdm
-import os
 
 # 全局模型實例
 _session = None
@@ -58,14 +56,13 @@ def load_arcface_model(model_path=r"C:\Users\VIPLAB\Desktop\Yan\gcn_clustering-m
         
         print(f"Loading ArcFace model from: {model_path}")
         
-        # 設定 providers
         if use_gpu:
             providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
             print("Attempting to use GPU...")
         else:
             providers = ['CPUExecutionProvider']
             print("Using CPU mode...")
-        
+                        
         try:
             # 載入模型
             _session = ort.InferenceSession(model_path, providers=providers)
@@ -119,13 +116,10 @@ def preprocess_face(img, input_size=(112, 112)):
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     
     # Step 3: Transpose to CHW
-    img = img.transpose(2, 0, 1)  # (H, W, C) -> (C, H, W)
-    
-    # Step 4: Normalize to [-1, 1]
     img = img.astype(np.float32)
     img = (img - 127.5) / 128.0
     
-    # Step 5: Add batch dimension
+    # Step 4: Add batch dimension
     img = np.expand_dims(img, axis=0)  # (C, H, W) -> (1, C, H, W)
     
     return img
@@ -164,7 +158,7 @@ def extract_single_feature(session, img, input_name):
         return None
 
 
-def extract_features_from_paths(face_paths, batch_size=32, use_gpu=False, model_path=None):
+def extract_features_from_paths(face_paths, batch_size=32, use_gpu=True, model_path=None):
     """
     從人臉圖片路徑列表提取特徵
     
@@ -279,7 +273,7 @@ def extract_features_from_paths(face_paths, batch_size=32, use_gpu=False, model_
     return facial_encodings
 
 
-def extract_features_batch(session, face_images, use_gpu=False):
+def extract_features_batch(session, face_images, use_gpu=True):
     """
     批次提取特徵（用於 video annotation）
     
@@ -346,7 +340,7 @@ def test_on_image(image_path, model_path=None):
         return
     
     # 載入模型
-    session = load_arcface_model(model_path=model_path, use_gpu=False)
+    session = load_arcface_model(model_path=model_path, use_gpu=True)
     input_name = session.get_inputs()[0].name
     
     # 讀取圖片
@@ -392,7 +386,7 @@ def compare_two_faces(image_path1, image_path2, model_path=None):
     encodings = extract_features_from_paths(
         [image_path1, image_path2],
         batch_size=2,
-        use_gpu=False,
+        use_gpu=True,
         model_path=model_path
     )
     
@@ -444,7 +438,7 @@ if __name__ == "__main__":
         print("=" * 60)
         
         try:
-            session = load_arcface_model(model_path=args.model, use_gpu=False)
+            session = load_arcface_model(model_path=args.model, use_gpu=True)
             print("\n✅ Model loaded successfully!")
             print("\nUsage examples:")
             print("  # Test single image:")
