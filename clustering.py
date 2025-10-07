@@ -232,6 +232,9 @@ def _chinese_whispers_adjusted(encoding_list, frame_info, quality_scores, thresh
     # Iterative clustering
     print(f"Starting adjusted Chinese Whispers iteration ({iterations} times)...")
     prev_labels = {node: G.nodes[node]['cluster'] for node in G.nodes}
+    stable_rounds = 0
+    stability_threshold = 0.01   
+    required_stable_rounds = 10
 
     for it in tqdm(range(iterations)):
         cluster_nodes = list(G.nodes)
@@ -259,9 +262,13 @@ def _chinese_whispers_adjusted(encoding_list, frame_info, quality_scores, thresh
 
         print(f"Iteration {it+1}: {changed} nodes changed ({change_ratio*100:.2f}%)")
 
-        if change_ratio < 0.01:
-            print(f"✅ Converged after {it+1} iterations.")
-            break
+        if change_ratio < stability_threshold:
+            stable_rounds += 1
+            if stable_rounds >= required_stable_rounds:
+                print(f"✅ Converged after {it+1} iterations (stable for {required_stable_rounds} rounds).")
+                break
+        else:
+            stable_rounds = 0
         
         prev_labels = curr_labels.copy()
     else:

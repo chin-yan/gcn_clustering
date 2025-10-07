@@ -182,7 +182,7 @@ def merge_audio_to_video(video_without_audio, video_with_audio, output_video_wit
 # ============================================================================
 
 def create_annotated_video_mp4(input_video, output_video_mp4, centers_data_path, model_dir,
-                              detection_interval=2, similarity_threshold=0.55, 
+                              detection_interval=2, similarity_threshold=0.45, 
                               temporal_weight=0.3, preserve_audio=True):
     """
     Create annotated video in MP4 format with optional audio preservation
@@ -362,7 +362,7 @@ def parse_arguments():
     parser.add_argument('--face_size', type=int, default=160, help='Face image size')
     parser.add_argument('--cluster_threshold', type=float, default=0.5, help='Clustering threshold')
     parser.add_argument('--frames_interval', type=int, default=30, help='Frame extraction interval')
-    parser.add_argument('--similarity_threshold', type=float, default=0.5, help='Face similarity threshold')
+    parser.add_argument('--similarity_threshold', type=float, default=0.45, help='Face similarity threshold')
     parser.add_argument('--temporal_weight', type=float, default=0.35, help='Temporal continuity weight')
     
     # Method selection
