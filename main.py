@@ -23,6 +23,7 @@ import enhanced_video_annotation
 import robust_temporal_consistency
 import cluster_post_processing
 import arcface_extractor
+from gcn_cluster_parser import adaptive_threshold_clustering
 
 tf.disable_v2_behavior()
 
@@ -353,8 +354,8 @@ def parse_arguments():
                         default=r"C:\Users\VIPLAB\Desktop\Yan\video-face-clustering\result_0831",
                         help='Output directory')
     parser.add_argument('--model_dir', type=str,
-                        default=r"C:\Users\VIPLAB\Desktop\Yan\video-face-clustering\models\20180402-114759",
-                        help='FaceNet model directory')
+                        default=r"C:\Users\VIPLAB\Desktop\Yan\gcn_clustering-master\models\arcface",
+                        help='ArcFace model directory')
     
     # Processing parameters
     parser.add_argument('--batch_size', type=int, default=100, help='Batch size for feature extraction')
@@ -365,9 +366,14 @@ def parse_arguments():
     parser.add_argument('--temporal_weight', type=float, default=0.35, help='Temporal continuity weight')
     
     # Method selection
-    parser.add_argument('--method', type=str, default='gcn', 
+    parser.add_argument('--method', type=str, default='adjusted', 
                         choices=['original', 'adjusted', 'hybrid', 'gcn'],
                         help='Clustering method: original, adjusted, or hybrid')
+    
+    # Feature extractor
+    parser.add_argument('--feature_extractor', type=str, default='arcface',
+                        choices=['arcface', 'facenet'],
+                        help='Feature extraction method')
     
     # Feature toggles
     parser.add_argument('--visualize', action='store_true', default=True, help='Create visualization')
@@ -437,31 +443,51 @@ def main():
             # Step 2: Feature extraction
             print("\n🧠 Step 2: Extracting facial features...")
 
-            print(f"DEBUG: Number of detected faces: {len(face_paths)}")
-            if not face_paths:
-                print("❌ ERROR: No faces detected in Step 1!")
-                return
-
-            model_dir = os.path.expanduser(args.model_dir)
-            feature_extraction.load_model(sess, model_dir)
-             
-            images_placeholder = tf.get_default_graph().get_tensor_by_name("input:0")
-            embeddings = tf.get_default_graph().get_tensor_by_name("embeddings:0")
-            phase_train_placeholder = tf.get_default_graph().get_tensor_by_name("phase_train:0")
-            embedding_size = embeddings.get_shape()[1]
-            
-            nrof_images = len(face_paths)
-            nrof_batches = int(math.ceil(1.0*nrof_images / args.batch_size))
-            emb_array = np.zeros((nrof_images, embedding_size))
-            
-            '''facial_encodings = feature_extraction.compute_facial_encodings(
-                sess, images_placeholder, embeddings, phase_train_placeholder,
-                args.face_size, embedding_size, nrof_images, nrof_batches,
-                emb_array, args.batch_size, face_paths
-            )'''
-
-            facial_encodings = arcface_extractor.extract_features_from_paths(
-                face_paths, batch_size=args.batch_size, use_gpu=False)
+            print(f"   Using feature extractor: {args.feature_extractor}")
+    
+            if args.feature_extractor == 'arcface':
+                # Use ArcFace
+                print("   📌 Using ArcFace (ONNX) for feature extraction")
+                
+                facial_encodings = arcface_extractor.extract_features_from_paths(
+                    face_paths=face_paths,
+                    batch_size=args.batch_size,
+                    use_gpu=True, 
+                )
+                
+                print(f"   ✅ Extracted {len(facial_encodings)} ArcFace features")
+                
+                # check feature dimension
+                if facial_encodings:
+                    sample_feat = list(facial_encodings.values())[0]
+                    print(f"   Feature dimension: {sample_feat.shape[0]}")
+                    print(f"   Feature norm: {np.linalg.norm(sample_feat):.3f}")
+                
+            else:
+                # Use FaceNet
+                print("   📌 Using FaceNet for feature extraction")
+                
+                with tf.Graph().as_default():
+                    with tf.Session() as sess:
+                        model_dir = os.path.expanduser(args.model_dir)
+                        feature_extraction.load_model(sess, model_dir)
+                        
+                        images_placeholder = tf.get_default_graph().get_tensor_by_name("input:0")
+                        embeddings = tf.get_default_graph().get_tensor_by_name("embeddings:0")
+                        phase_train_placeholder = tf.get_default_graph().get_tensor_by_name("phase_train:0")
+                        embedding_size = embeddings.get_shape()[1]
+                        
+                        nrof_images = len(face_paths)
+                        nrof_batches = int(math.ceil(1.0*nrof_images / args.batch_size))
+                        emb_array = np.zeros((nrof_images, embedding_size))
+                        
+                        facial_encodings = feature_extraction.compute_facial_encodings(
+                            sess, images_placeholder, embeddings, phase_train_placeholder,
+                            args.face_size, embedding_size, nrof_images, nrof_batches,
+                            emb_array, args.batch_size, face_paths
+                        )
+                
+                print(f"   ✅ Extracted {len(facial_encodings)} FaceNet features")
             
             # Step 3: Clustering
             print("\n🎯 Step 3: Clustering faces...")
@@ -484,8 +510,7 @@ def main():
                 
                 # Prepare GCN data
                 from prepare_feature import GCNDataPreparator
-                from gcn_cluster_parser import run_gcn_clustering_and_parse
-                import pickle
+                from gcn_cluster_parser import run_gcn_clustering_and_parse, adaptive_threshold_clustering
 
                 n_faces = len(facial_encodings)
                 k_neighbors = min(50, n_faces - 1) 
@@ -509,17 +534,48 @@ def main():
                 with open(os.path.join(gcn_temp_dir, 'image_paths.pkl'), 'wb') as f:
                     pickle.dump(paths, f)
                 
-                # Run GCN and parse results to clusters
-                clusters = run_gcn_clustering_and_parse(
-                    features_path=features_path,
-                    knn_graph_path=knn_graph_path,
-                    image_paths=paths,
-                    gcn_checkpoint='gcn_clustering-master/logs/logs/best.ckpt',
-                    output_dir=gcn_temp_dir,
-                    threshold=0.5  # You can adjust this threshold
-                )
+                # Run GCN clustering first
+                print("Running GCN inference to generate edges and scores...")
+                try:
+                    # This will run GCN and save edges.npy and scores.npy
+                    clusters_initial = run_gcn_clustering_and_parse(
+                        features_path=features_path,
+                        knn_graph_path=knn_graph_path,
+                        image_paths=paths,
+                        gcn_checkpoint='gcn_clustering-master/logs/logs/best.ckpt',
+                        output_dir=gcn_temp_dir,
+                        threshold=0.5  # Initial threshold, will be overridden
+                    )
+                    
+                    # Now use adaptive threshold on the generated edges and scores
+                    print("\n🔄 Using adaptive threshold to find optimal clustering...")
+                    clusters, best_threshold = adaptive_threshold_clustering(
+                        edges_path=os.path.join(gcn_temp_dir, 'edges.npy'),
+                        scores_path=os.path.join(gcn_temp_dir, 'scores.npy'),
+                        image_paths=paths,
+                        min_threshold=0.2,  # Lower minimum threshold
+                        max_threshold=0.7,  # Reasonable maximum threshold
+                        target_cluster_count=None  # Let it find optimal number automatically
+                    )
+                    
+                    print(f"✅ Selected threshold: {best_threshold:.3f}")
+                    print(f"   Total clusters found: {len(clusters)}")
+                    print(f"   Total faces assigned: {sum(len(c) for c in clusters)}")
+                    
+                    # Verify all faces are assigned
+                    assigned_faces = sum(len(c) for c in clusters)
+                    if assigned_faces < len(facial_encodings):
+                        print(f"   ⚠️ Warning: {len(facial_encodings) - assigned_faces} faces not assigned")
+                        print("   These will be handled in post-processing")
+                    
+                except Exception as e:
+                    print(f"❌ GCN clustering error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    clusters = None
                 
-                if clusters is None:
+                # Fallback to Chinese Whispers if GCN fails
+                if clusters is None or len(clusters) == 0:
                     print("GCN failed, falling back to Chinese Whispers")
                     clusters = clustering.cluster_facial_encodings(
                         facial_encodings, threshold=args.cluster_threshold
@@ -528,7 +584,7 @@ def main():
                 clusters = clustering.cluster_facial_encodings(
                     facial_encodings, 
                     threshold=args.cluster_threshold,
-                    iterations=25,
+                    iterations=50,
                     temporal_weight=args.temporal_weight
                 )
             elif args.method == 'hybrid':
@@ -538,7 +594,7 @@ def main():
                 adjusted_clusters = clustering.cluster_facial_encodings(
                     facial_encodings, 
                     threshold=args.cluster_threshold,
-                    iterations=25,
+                    iterations=50,
                     temporal_weight=args.temporal_weight
                 )
                 
@@ -569,7 +625,7 @@ def main():
                 processed_clusters, merge_actions = cluster_post_processing.post_process_clusters(
                     clusters, facial_encodings,
                     min_large_cluster_size=50,  # Large cluster threshold
-                    small_cluster_percentage=0.08,  # Small clusters = 8% of total faces
+                    small_cluster_percentage=0.03,  # Small clusters = 8% of total faces
                     merge_threshold=0.40,  # Much lower base threshold for aggressive merging
                     max_merges_per_cluster=10,  # Allow more merges per large cluster
                     safety_checks=True

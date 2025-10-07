@@ -96,7 +96,7 @@ def compute_face_quality(face_path):
 
     return quality_score
 
-def cluster_facial_encodings(facial_encodings, threshold=0.55, iterations=30, temporal_weight=0.25):
+def cluster_facial_encodings(facial_encodings, threshold=0.55, iterations=50, temporal_weight=0.25):
     """
     Improved clustering for face encoding using Chinese Whispers algorithm
     with temporal analysis but more balanced parameters to avoid over-clustering
@@ -143,7 +143,7 @@ def cluster_facial_encodings(facial_encodings, threshold=0.55, iterations=30, te
     return final_clusters
 
 def _chinese_whispers_adjusted(encoding_list, frame_info, quality_scores, threshold=0.55, 
-                              iterations=30, temporal_weight=0.25):
+                              iterations=50, temporal_weight=0.25):
     """
     Adjusted implementation of Chinese Whispers Clustering Algorithm
     with better balance between facial similarity and temporal continuity
@@ -231,7 +231,9 @@ def _chinese_whispers_adjusted(encoding_list, frame_info, quality_scores, thresh
     
     # Iterative clustering
     print(f"Starting adjusted Chinese Whispers iteration ({iterations} times)...")
-    for _ in tqdm(range(iterations)):
+    prev_labels = {node: G.nodes[node]['cluster'] for node in G.nodes}
+
+    for it in tqdm(range(iterations)):
         cluster_nodes = list(G.nodes)
         shuffle(cluster_nodes)
         
@@ -242,24 +244,28 @@ def _chinese_whispers_adjusted(encoding_list, frame_info, quality_scores, thresh
             # Collect clustering information of neighbors
             for ne in neighbors:
                 if isinstance(ne, int):
-                    if G.nodes[ne]['cluster'] in clusters:
-                        # Weight by edge weight but reduce influence of quality
-                        weight = G[node][ne]['weight'] * (0.7 + 0.3 * G.nodes[ne]['quality'])  # Less influence of quality
-                        clusters[G.nodes[ne]['cluster']] += weight
-                    else:
-                        weight = G[node][ne]['weight'] * (0.7 + 0.3 * G.nodes[ne]['quality'])
-                        clusters[G.nodes[ne]['cluster']] = weight
+                    weight = G[node][ne]['weight'] * (0.7 + 0.3 * G.nodes[ne]['quality'])
+                    clusters[G.nodes[ne]['cluster']] = clusters.get(G.nodes[ne]['cluster'], 0) + weight
             
             # Find the cluster with the highest weight sum
-            edge_weight_sum = 0
-            max_cluster = 0
-            for cluster in clusters:
-                if clusters[cluster] > edge_weight_sum:
-                    edge_weight_sum = clusters[cluster]
-                    max_cluster = cluster
-            
-            # Set the clustering of the target node
-            G.nodes[node]['cluster'] = max_cluster
+            if clusters:
+                max_cluster = max(clusters, key=clusters.get)
+                G.nodes[node]['cluster'] = max_cluster
+        
+        # Convergence check
+        curr_labels = {node: G.nodes[node]['cluster'] for node in G.nodes}
+        changed = sum(1 for n in G.nodes if curr_labels[n] != prev_labels[n])
+        change_ratio = changed / len(G.nodes)
+
+        print(f"Iteration {it+1}: {changed} nodes changed ({change_ratio*100:.2f}%)")
+
+        if change_ratio < 0.01:
+            print(f"✅ Converged after {it+1} iterations.")
+            break
+        
+        prev_labels = curr_labels.copy()
+    else:
+        print("⚠️ Reached max iterations without full convergence.")
     
     # Preparing clustering output
     clusters = {}
